@@ -27,6 +27,8 @@ import { create } from 'zustand'
 
 const STORAGE_KEY = 'stremio-manager:accounts'
 const CHANGELOG_KEY = 'stremio-manager:changelog'
+const NUVIO_AUTO_SYNC_DELAY_MS = 2500
+const nuvioAutoSyncTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 // Manifest Cache to speed up sync baseline recovery
 const MANIFEST_CACHE: Record<string, { manifest: AddonDescriptor['manifest']; timestamp: number }> =
@@ -72,6 +74,8 @@ interface AccountStore {
       syncAccount: (id: string, forceRefresh?: boolean) => Promise<void>
       syncAllAccounts: (silent?: boolean) => Promise<void>
       repairAccount: (id: string) => Promise<void>
+      syncAccountToNuvio: (id: string, silent?: boolean) => Promise<{ addons: number; library: number; watchHistory: number; watchProgress: number }>
+      queueNuvioSyncForAccount: (id: string) => void
       installAddonToAccount: (accountId: string, addonUrl: string) => Promise<void>
       removeAddonFromAccount: (accountId: string, transportUrl: string) => Promise<void>
       removeAddonByIndexFromAccount: (accountId: string, index: number) => Promise<void>
@@ -80,7 +84,15 @@ interface AccountStore {
       importAccounts: (json: string, isSilent?: boolean, mode?: 'merge' | 'mirror') => Promise<void>
       updateAccount: (
             id: string,
-            data: { name: string; authKey?: string; email?: string; password?: string; accentColor?: string; emoji?: string }
+            data: {
+                  name: string
+                  authKey?: string
+                  email?: string
+                  password?: string
+                  accentColor?: string
+                  emoji?: string
+                  nuvioLink?: { email: string; password?: string; profileId: number; profileName?: string } | null
+            }
       ) => Promise<void>
       toggleAddonProtection: (
             accountId: string,
@@ -501,6 +513,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                   const { useAddonStore } = await import('./addonStore')
                   await useAddonStore.getState().syncAccountState(id, account.authKey, repairedAddons).catch(console.error)
+
+                  get().queueNuvioSyncForAccount(id)
             } catch (error) {
                   const message = error instanceof Error ? error.message : 'Failed to sync account'
                   const accounts = get().accounts.map((acc) =>
@@ -562,6 +576,8 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
                               const { useAddonStore } = await import('./addonStore')
                               await useAddonStore.getState().syncAccountState(account.id, account.authKey, finalAddons).catch(console.error)
+
+                              if (isDirty) get().queueNuvioSyncForAccount(account.id)
                         } catch (error) {
                               const updatedAccounts = get().accounts.map((acc) =>
                                     acc.id === account.id ? { ...acc, status: 'error' as const } : acc
@@ -587,6 +603,84 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
 
       repairAccount: async (id: string) => {
             return get().syncAccount(id, true)
+      },
+
+      queueNuvioSyncForAccount: (id: string) => {
+            const account = get().accounts.find((acc) => acc.id === id)
+            if (!account?.nuvioLink) return
+
+            const existingTimer = nuvioAutoSyncTimers.get(id)
+            if (existingTimer) clearTimeout(existingTimer)
+
+            const timer = setTimeout(() => {
+                  nuvioAutoSyncTimers.delete(id)
+                  get().syncAccountToNuvio(id, true).catch((error) => {
+                        console.warn(`[Nuvio] Automatic sync failed for ${account.name || account.id}:`, error)
+                  })
+            }, NUVIO_AUTO_SYNC_DELAY_MS)
+
+            nuvioAutoSyncTimers.set(id, timer)
+      },
+
+      syncAccountToNuvio: async (id: string, silent: boolean = false) => {
+            if (!silent) set({ loading: true, error: null })
+            try {
+                  const account = get().accounts.find((acc) => acc.id === id)
+                  if (!account) throw new Error('Account not found')
+                  if (!account.nuvioLink) throw new Error('Link this account to a Nuvio profile first')
+
+                  const authKey = await decrypt(account.authKey, getEncryptionKey())
+                  const nuvioPassword = await decrypt(account.nuvioLink.password, getEncryptionKey())
+                  const { stremioClient } = await import('@/api/stremio-client')
+                  const { syncStremioToNuvio } = await import('@/lib/nuvio-sync')
+
+                  const [addons, libraryItems] = await Promise.all([
+                        getAddons(authKey, account.id),
+                        stremioClient.getLibraryItems(authKey, account.id),
+                  ])
+
+                  const result = await syncStremioToNuvio({
+                        email: account.nuvioLink.email,
+                        password: nuvioPassword,
+                        profileId: account.nuvioLink.profileId,
+                        addons,
+                        libraryItems,
+                  })
+
+                  const normalizedAddons = addons.map((addon) => ({
+                        ...addon,
+                        manifest: sanitizeAddonManifest(addon.manifest, addon.transportUrl),
+                  }))
+
+                  const accounts = get().accounts.map((acc) =>
+                        acc.id === id
+                              ? {
+                                    ...acc,
+                                    addons: normalizedAddons,
+                                    lastSync: new Date(),
+                                    status: 'active' as const,
+                                    nuvioLink: {
+                                          ...acc.nuvioLink!,
+                                          lastSync: new Date().toISOString(),
+                                    },
+                              }
+                              : acc
+                  )
+
+                  set({ accounts })
+                  await localforage.setItem(STORAGE_KEY, structuredClone(accounts))
+
+                  const { useSyncStore } = await import('./syncStore')
+                  useSyncStore.getState().syncToRemote(true).catch(console.error)
+
+                  return result
+            } catch (error) {
+                  const message = error instanceof Error ? error.message : 'Failed to sync account to Nuvio'
+                  if (!silent) set({ error: message })
+                  throw error
+            } finally {
+                  if (!silent) set({ loading: false })
+            }
       },
 
       installAddonToAccount: async (accountId: string, addonUrl: string) => {
@@ -821,6 +915,20 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                           : undefined,
                               accentColor: acc.accentColor,
                               emoji: acc.emoji,
+                              nuvioLink: includeCredentialsValue && acc.nuvioLink
+                                    ? {
+                                          ...acc.nuvioLink,
+                                          password: await decrypt(acc.nuvioLink.password, getEncryptionKey()!),
+                                    }
+                                    : acc.nuvioLink
+                                          ? {
+                                                email: acc.nuvioLink.email,
+                                                profileId: acc.nuvioLink.profileId,
+                                                profileName: acc.nuvioLink.profileName,
+                                                linkedAt: acc.nuvioLink.linkedAt,
+                                                lastSync: acc.nuvioLink.lastSync,
+                                          }
+                                          : undefined,
                               addons: processAddons(acc.addons),
                         }))
                   )
@@ -943,6 +1051,7 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                     : [],
                               accentColor: acc.accentColor,
                               emoji: acc.emoji,
+                              nuvioLink: acc.nuvioLink,
                               lastSync: new Date(),
                               status: 'active' as const,
                         }
@@ -994,6 +1103,15 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                           : matchedAccount.authKey,
                                     accentColor: ra.accentColor || matchedAccount.accentColor,
                                     emoji: ra.emoji || matchedAccount.emoji,
+                                    nuvioLink: ra.nuvioLink?.password
+                                          ? {
+                                                ...ra.nuvioLink,
+                                                password:
+                                                      typeof ra.nuvioLink.password === 'string' && ra.nuvioLink.password.length > 50
+                                                            ? ra.nuvioLink.password
+                                                            : await encrypt(ra.nuvioLink.password, encryptionKey),
+                                          }
+                                          : matchedAccount.nuvioLink,
                                     addons: mode === 'mirror' ? ra.addons : mergeAddons(matchedAccount.addons, ra.addons),
                                     lastSync: ra.lastSync || new Date(),
                                     status: 'active' as const,
@@ -1005,6 +1123,12 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                                     ...ra,
                                     authKey: await encrypt(ra.rawKey, encryptionKey),
                                     password: ra.password ? await encrypt(ra.password, encryptionKey) : undefined,
+                                    nuvioLink: ra.nuvioLink?.password
+                                          ? {
+                                                ...ra.nuvioLink,
+                                                password: await encrypt(ra.nuvioLink.password, encryptionKey),
+                                          }
+                                          : undefined,
                               } as StremioAccount)
                         }
                   }
@@ -1031,7 +1155,15 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
             }
       },
 
-      updateAccount: async (id: string, data: { name: string; authKey?: string; email?: string; password?: string; accentColor?: string; emoji?: string }) => {
+      updateAccount: async (id: string, data: {
+            name: string
+            authKey?: string
+            email?: string
+            password?: string
+            accentColor?: string
+            emoji?: string
+            nuvioLink?: { email: string; password?: string; profileId: number; profileName?: string } | null
+      }) => {
             set({ loading: true, error: null })
             try {
                   const account = get().accounts.find((acc) => acc.id === id)
@@ -1042,6 +1174,26 @@ export const useAccountStore = create<AccountStore>((set, get) => ({
                         name: data.name,
                         accentColor: data.accentColor,
                         emoji: data.emoji,
+                  }
+
+                  if (data.nuvioLink === null) {
+                        updatedAccount.nuvioLink = undefined
+                  } else if (data.nuvioLink) {
+                        const existingPassword = account.nuvioLink?.password
+                        if (!data.nuvioLink.password && !existingPassword) {
+                              throw new Error('Nuvio password is required to link a profile')
+                        }
+
+                        updatedAccount.nuvioLink = {
+                              email: data.nuvioLink.email,
+                              password: data.nuvioLink.password
+                                    ? await encrypt(data.nuvioLink.password, getEncryptionKey())
+                                    : existingPassword!,
+                              profileId: data.nuvioLink.profileId,
+                              profileName: data.nuvioLink.profileName,
+                              linkedAt: account.nuvioLink?.linkedAt || new Date().toISOString(),
+                              lastSync: account.nuvioLink?.lastSync,
+                        }
                   }
                   if (data.authKey || (data.email && data.password)) {
                         const authKey =

@@ -24,6 +24,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
+import { getNuvioProfiles, NuvioProfile, signInToNuvio } from '@/api/nuvio'
 import {
   Popover,
   PopoverContent,
@@ -54,6 +55,12 @@ export function AccountForm() {
   const [accentColor, setAccentColor] = useState<string | undefined>(undefined)
   const [emoji, setEmoji] = useState('')
   const [emojiSearch, setEmojiSearch] = useState('')
+  const [nuvioEnabled, setNuvioEnabled] = useState(false)
+  const [nuvioEmail, setNuvioEmail] = useState('')
+  const [nuvioPassword, setNuvioPassword] = useState('')
+  const [nuvioProfileId, setNuvioProfileId] = useState(1)
+  const [nuvioProfiles, setNuvioProfiles] = useState<NuvioProfile[]>([])
+  const [nuvioLoading, setNuvioLoading] = useState(false)
 
   useEffect(() => {
     if (editingAccount) {
@@ -72,6 +79,19 @@ export function AccountForm() {
         // Don't show existing auth key for security
         setAuthKey('')
       }
+      setNuvioEnabled(!!editingAccount.nuvioLink)
+      setNuvioEmail(editingAccount.nuvioLink?.email || '')
+      setNuvioPassword('')
+      setNuvioProfileId(editingAccount.nuvioLink?.profileId || 1)
+      setNuvioProfiles(
+        editingAccount.nuvioLink
+          ? [{
+            id: String(editingAccount.nuvioLink.profileId),
+            profile_index: editingAccount.nuvioLink.profileId,
+            name: editingAccount.nuvioLink.profileName || `Profile ${editingAccount.nuvioLink.profileId}`,
+          }]
+          : []
+      )
     } else {
       // Reset defaults for add mode
       setMode('credentials')
@@ -82,6 +102,11 @@ export function AccountForm() {
       setError('')
       setAccentColor(undefined)
       setEmoji('')
+      setNuvioEnabled(false)
+      setNuvioEmail('')
+      setNuvioPassword('')
+      setNuvioProfileId(1)
+      setNuvioProfiles([])
     }
   }, [editingAccount, isOpen])
 
@@ -105,6 +130,14 @@ export function AccountForm() {
 
     try {
       if (editingAccount) {
+        if (nuvioEnabled && !nuvioEmail.trim()) {
+          setError('Nuvio email is required')
+          return
+        }
+        if (nuvioEnabled && !nuvioPassword && !editingAccount.nuvioLink?.password) {
+          setError('Nuvio password is required')
+          return
+        }
         // Update mode
         await updateAccount(editingAccount.id, {
           name: name.trim(),
@@ -118,6 +151,14 @@ export function AccountForm() {
           password: mode === 'credentials' && password ? password : undefined,
           accentColor: accentColor === 'none' ? undefined : accentColor,
           emoji: emoji.trim() || undefined,
+          nuvioLink: nuvioEnabled
+            ? {
+              email: nuvioEmail.trim(),
+              password: nuvioPassword || undefined,
+              profileId: nuvioProfileId,
+              profileName: nuvioProfiles.find((profile) => profile.profile_index === nuvioProfileId)?.name,
+            }
+            : null,
         })
       } else {
         // Add mode
@@ -147,6 +188,32 @@ export function AccountForm() {
 
   const isEditing = !!editingAccount
 
+  const handleLoadNuvioProfiles = async () => {
+    setError('')
+    if (!nuvioEmail.trim()) {
+      setError('Nuvio email is required')
+      return
+    }
+    if (!nuvioPassword) {
+      setError('Nuvio password is required')
+      return
+    }
+
+    setNuvioLoading(true)
+    try {
+      const session = await signInToNuvio(nuvioEmail.trim(), nuvioPassword)
+      const profiles = await getNuvioProfiles(session.access_token)
+      setNuvioProfiles(profiles)
+      if (profiles.length > 0 && !profiles.some((profile) => profile.profile_index === nuvioProfileId)) {
+        setNuvioProfileId(profiles[0].profile_index)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load Nuvio profiles')
+    } finally {
+      setNuvioLoading(false)
+    }
+  }
+
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && handleClose()}>
       <DialogContent>
@@ -161,13 +228,18 @@ export function AccountForm() {
 
         <form onSubmit={handleSubmit} className="mt-4">
           <Tabs defaultValue="account" className="w-full">
-            <TabsList className="grid w-full grid-cols-2 mb-6 bg-muted/20 p-1 h-11 rounded-full border border-border/10">
+            <TabsList className={`grid w-full ${isEditing ? 'grid-cols-3' : 'grid-cols-2'} mb-6 bg-muted/20 p-1 h-11 rounded-full border border-border/10`}>
               <TabsTrigger value="account" className="rounded-full data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-md transition-all h-9 font-bold">
                 Account
               </TabsTrigger>
               <TabsTrigger value="customize" className="rounded-full data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-md transition-all h-9 font-bold">
                 Customize
               </TabsTrigger>
+              {isEditing && (
+                <TabsTrigger value="nuvio" className="rounded-full data-[state=active]:bg-primary data-[state=active]:text-primary-foreground data-[state=active]:shadow-md transition-all h-9 font-bold">
+                  Nuvio
+                </TabsTrigger>
+              )}
             </TabsList>
 
             <TabsContent value="account" className="space-y-4 animate-in fade-in slide-in-from-left-2 duration-300">
@@ -561,6 +633,89 @@ export function AccountForm() {
                 </div>
               </div>
             </TabsContent>
+
+            {isEditing && (
+              <TabsContent value="nuvio" className="space-y-5 animate-in fade-in slide-in-from-right-2 duration-300">
+                <div className="bg-primary/5 border border-primary/20 p-4 rounded-xl space-y-3">
+                  <div className="flex items-start gap-3">
+                    <input
+                      id="nuvio-enabled"
+                      type="checkbox"
+                      checked={nuvioEnabled}
+                      onChange={(e) => setNuvioEnabled(e.target.checked)}
+                      className="mt-1 h-4 w-4 accent-primary"
+                    />
+                    <div>
+                      <Label htmlFor="nuvio-enabled" className="text-sm font-bold">Link this Stremio account to Nuvio</Label>
+                      <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                        The account menu will show a Nuvio sync action that pushes this Stremio account into the selected Nuvio profile.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                {nuvioEnabled && (
+                  <div className="space-y-4">
+                    <div className="space-y-2">
+                      <Label htmlFor="nuvio-email" className="text-xs font-bold uppercase tracking-widest opacity-60">Nuvio Email</Label>
+                      <Input
+                        id="nuvio-email"
+                        type="email"
+                        value={nuvioEmail}
+                        onChange={(e) => setNuvioEmail(e.target.value)}
+                        placeholder="nuvio@email.com"
+                        className="bg-background/50 border-muted focus:bg-background transition-colors h-11"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label htmlFor="nuvio-password" className="text-xs font-bold uppercase tracking-widest opacity-60">Nuvio Password</Label>
+                      <Input
+                        id="nuvio-password"
+                        type="password"
+                        value={nuvioPassword}
+                        onChange={(e) => setNuvioPassword(e.target.value)}
+                        placeholder={editingAccount.nuvioLink ? 'Leave blank to keep unchanged' : 'Enter your Nuvio password'}
+                        className="bg-background/50 border-muted focus:bg-background transition-colors h-11"
+                      />
+                    </div>
+
+                    <div className="space-y-2">
+                      <Label className="text-xs font-bold uppercase tracking-widest opacity-60">Target Profile</Label>
+                      <div className="flex flex-wrap gap-2">
+                        {(nuvioProfiles.length > 0 ? nuvioProfiles : [1, 2, 3, 4].map((profileId) => ({
+                          id: String(profileId),
+                          profile_index: profileId,
+                          name: `Profile ${profileId}`,
+                        }))).map((profile) => (
+                          <Button
+                            key={profile.profile_index}
+                            type="button"
+                            variant={nuvioProfileId === profile.profile_index ? 'default' : 'outline'}
+                            size="sm"
+                            onClick={() => setNuvioProfileId(profile.profile_index)}
+                            className="rounded-full text-xs font-bold"
+                          >
+                            {profile.name || `Profile ${profile.profile_index}`}
+                          </Button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={handleLoadNuvioProfiles}
+                      disabled={nuvioLoading}
+                      className="w-full rounded-xl font-bold"
+                    >
+                      <RefreshCw className={`mr-2 h-4 w-4 ${nuvioLoading ? 'animate-spin' : ''}`} />
+                      {nuvioLoading ? 'Loading Profiles...' : 'Load Nuvio Profiles'}
+                    </Button>
+                  </div>
+                )}
+              </TabsContent>
+            )}
           </Tabs>
 
           {error && (

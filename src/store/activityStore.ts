@@ -81,6 +81,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
                     const libraryItems = await stremioClient.getLibraryItems(authKey, account.id) as LibraryItem[]
 
                     console.log(`[Activity] Fetched ${libraryItems.length} library items for ${account.name || account.id}`)
+                    useAccountStore.getState().queueNuvioSyncForAccount(account.id)
 
                     // Build History (watched items only)
                     const activityItems = libraryItems
@@ -215,6 +216,7 @@ export const useActivityStore = create<ActivityState>((set, get) => ({
                                 stremioClient.removeLibraryItem(authKey, item.itemId)
                                     .catch(e => console.error(`Failed to remove item ${item.itemId} from Stremio library:`, e))
                             ))
+                            useAccountStore.getState().queueNuvioSyncForAccount(accountId)
                         } catch (err) {
                             console.error(`Failed to process deletions for account ${account.name}:`, err)
                         }

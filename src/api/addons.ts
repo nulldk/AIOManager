@@ -29,7 +29,14 @@ export async function updateAddons(authKey: string, addons: AddonDescriptor[], a
       manifest: getEffectiveManifest(addon)
     }))
 
-  return stremioClient.setAddonCollection(authKey, preparedAddons, accountContext)
+  await stremioClient.setAddonCollection(authKey, preparedAddons, accountContext)
+
+  try {
+    const { useAccountStore } = await import('@/store/accountStore')
+    useAccountStore.getState().queueNuvioSyncForAccount(accountContext)
+  } catch (error) {
+    console.warn('[Nuvio] Failed to queue automatic sync:', error)
+  }
 }
 
 

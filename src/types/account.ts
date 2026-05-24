@@ -6,6 +6,15 @@ import { AccountAddonState } from './saved-addon'
 
 export type AccountStatus = 'active' | 'error'
 
+export interface NuvioProfileLink {
+  email: string
+  password: string // Encrypted
+  profileId: number
+  profileName?: string
+  linkedAt: string
+  lastSync?: string
+}
+
 export interface StremioAccount {
   id: string
   name: string
@@ -17,6 +26,7 @@ export interface StremioAccount {
   status: AccountStatus
   accentColor?: string
   emoji?: string
+  nuvioLink?: NuvioProfileLink
 }
 
 export interface AddonChangelogEntry {

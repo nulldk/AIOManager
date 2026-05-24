@@ -12,7 +12,7 @@ import { useUIStore } from '@/store/uiStore'
 import { useFailoverStore } from '@/store/failoverStore'
 import { useLibraryCache } from '@/store/libraryCache'
 import { StremioAccount } from '@/types/account'
-import { AlertCircle, AlertTriangle, ShieldCheck, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ChevronRight, ArrowUpCircle } from 'lucide-react'
+import { AlertCircle, AlertTriangle, ShieldCheck, MoreVertical, Pencil, RefreshCw, Trash, GripVertical, ChevronRight, ArrowUpCircle, Cloud } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { maskEmail, getTimeAgo, isNewerVersion } from '@/lib/utils'
 import { memo, useMemo, useRef, useEffect, useState } from 'react'
@@ -48,7 +48,7 @@ export const AccountCard = memo(function AccountCard({
   const preventNavRef = useRef(false)
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const { toast } = useToast()
-  const { syncAccount, repairAccount, loading } = useAccounts()
+  const { syncAccount, syncAccountToNuvio, repairAccount, loading } = useAccounts()
   const { openAddAccountDialog, isAddAccountDialogOpen } = useUIStore(
     useShallow((state) => ({
       openAddAccountDialog: state.openAddAccountDialog,
@@ -243,6 +243,34 @@ export const AccountCard = memo(function AccountCard({
                     <DropdownMenuItem
                       onClick={async (e) => {
                         e.stopPropagation();
+                        if (!account.nuvioLink) {
+                          toast({ title: 'Nuvio profile not linked', description: 'Open Edit and add a Nuvio profile link first.' });
+                          handleEdit();
+                          return;
+                        }
+                        try {
+                          toast({ title: 'Syncing to Nuvio...', description: `Updating ${account.nuvioLink.profileName || `Profile ${account.nuvioLink.profileId}`}` });
+                          const result = await syncAccountToNuvio(account.id);
+                          toast({
+                            title: 'Nuvio Sync Complete',
+                            description: `${result.addons} addons, ${result.library} library items, ${result.watchHistory} watched, ${result.watchProgress} in progress`,
+                          });
+                        } catch (err) {
+                          toast({
+                            variant: 'destructive',
+                            title: 'Nuvio Sync Failed',
+                            description: err instanceof Error ? err.message : `Could not sync ${displayName} to Nuvio`,
+                          });
+                        }
+                      }}
+                      disabled={loading}
+                    >
+                      <Cloud className={`mr-2 h-4 w-4 ${loading ? 'animate-pulse' : ''}`} />
+                      Sync to Nuvio
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onClick={async (e) => {
+                        e.stopPropagation();
                         try {
                           toast({ title: 'Repairing...', description: `Deep refreshing ${displayName}` });
                           await repairAccount(account.id);
@@ -303,6 +331,14 @@ export const AccountCard = memo(function AccountCard({
                     </span>
                   </>
                 )}
+              </div>
+            )}
+            {account.nuvioLink && (
+              <div className="flex items-center gap-1.5 text-sm">
+                <Cloud className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+                <span className="text-sky-500 font-medium truncate">
+                  Nuvio {account.nuvioLink.profileName || `Profile ${account.nuvioLink.profileId}`}
+                </span>
               </div>
             )}
             {lastWatched && (

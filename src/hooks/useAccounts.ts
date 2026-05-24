@@ -20,6 +20,7 @@ export function useAccounts() {
     addAccountByCredentials,
     removeAccount,
     syncAccount,
+    syncAccountToNuvio: useAccountStore((state) => state.syncAccountToNuvio),
     syncAllAccounts,
     repairAccount: useAccountStore((state) => state.repairAccount),
     updateAccount: useAccountStore((state) => state.updateAccount),
